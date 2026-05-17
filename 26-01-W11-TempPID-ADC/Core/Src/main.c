@@ -17,7 +17,7 @@
   *
   ******************************************************************************
   */
-/* USER CODE END Header */
+/* USER CODE END Header */ 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
@@ -47,7 +47,7 @@ typedef enum
 #define BUZZER_TIMER_TICK_HZ 10000U
 #define BUZZER_NOTE_MS       1000U
 #define BUZZER_GAP_MS        100U
-#define UART_CMD_BUF_LEN     16U
+#define UART_CMD_BUF_LEN     64U
 #define UART_RX_QUEUE_LEN    64U
 #define ADC_MOVING_AVG_SAMPLES 8U
 
@@ -103,6 +103,7 @@ uint16_t pid_last_adc_raw = 0U;
 uint32_t pid_last_tick = 0U;
 uint32_t pid_report_tick = 0U;
 uint32_t temp_report_tick = 0U;
+uint8_t pid_cv_csv_mode = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -127,6 +128,17 @@ static void EnterTempMode(void);
 static void EnterIdleMode(void);
 static void PID_Update(void);
 static uint8_t PID_ParseSetpointCommand(const char *cmd, float *setpoint_out);
+static uint8_t PID_ParseFloatToken(const char **p_inout, float *value_out);
+static uint8_t PID_ParseCoeffCommand(const char *cmd,
+                                     uint8_t *target_out,
+                                     float *value_out,
+                                     uint8_t *has_value_out,
+                                     uint8_t *is_all_out,
+                                     float *all_kp_out,
+                                     float *all_ki_out,
+                                     float *all_kd_out);
+static const char *AppModeToString(AppMode_t mode);
+static void UART_PrintCurrentStatus(void);
 int __io_putchar(int ch);
 
 /* USER CODE END PFP */
@@ -443,6 +455,234 @@ static uint8_t PID_ParseSetpointCommand(const char *cmd, float *setpoint_out)
   return 1U;
 }
 
+static uint8_t PID_ParseFloatToken(const char **p_inout, float *value_out)
+{
+  const char *p = *p_inout;
+  int sign = 1;
+  int32_t int_part = 0;
+  int32_t frac_part = 0;
+  int32_t frac_div = 1;
+  float value;
+
+  if ((*p == '+') || (*p == '-'))
+  {
+    if (*p == '-')
+    {
+      sign = -1;
+    }
+    p++;
+  }
+
+  if (!isdigit((unsigned char)*p))
+  {
+    return 0U;
+  }
+
+  while (isdigit((unsigned char)*p))
+  {
+    int_part = (int_part * 10) + (int32_t)(*p - '0');
+    p++;
+  }
+
+  if (*p == '.')
+  {
+    p++;
+    while (isdigit((unsigned char)*p) && (frac_div < 10000))
+    {
+      frac_part = (frac_part * 10) + (int32_t)(*p - '0');
+      frac_div *= 10;
+      p++;
+    }
+  }
+
+  while ((*p == ' ') || (*p == '\t'))
+  {
+    p++;
+  }
+
+  if (*p != '\0')
+  {
+    return 0U;
+  }
+
+  value = (float)sign * ((float)int_part + ((float)frac_part / (float)frac_div));
+  if ((value < 0.0f) || (value > 1000.0f))
+  {
+    return 0U;
+  }
+
+  *p_inout = p;
+  *value_out = value;
+  return 1U;
+}
+
+static uint8_t PID_ParseCoeffCommand(const char *cmd,
+                                     uint8_t *target_out,
+                                     float *value_out,
+                                     uint8_t *has_value_out,
+                                     uint8_t *is_all_out,
+                                     float *all_kp_out,
+                                     float *all_ki_out,
+                                     float *all_kd_out)
+{
+  const char *p = cmd;
+  const char *name_start;
+  int name_len = 0;
+
+  if ((p[0] != 'c') || (p[1] != 'o') || (p[2] != 'e') || (p[3] != 'f') || (p[4] != 'f'))
+  {
+    return 0U;
+  }
+  p += 5;
+
+  while ((*p == ' ') || (*p == '\t'))
+  {
+    p++;
+  }
+
+  *is_all_out = 0U;
+  if (*p == '\0')
+  {
+    *target_out = 0U;
+    *has_value_out = 0U;
+    return 1U;
+  }
+
+  name_start = p;
+  while (isalpha((unsigned char)*p))
+  {
+    name_len++;
+    p++;
+  }
+
+  if ((name_len == 2) && (name_start[0] == 'k') && (name_start[1] == 'p'))
+  {
+    *target_out = 1U;
+  }
+  else if ((name_len == 2) && (name_start[0] == 'k') && (name_start[1] == 'i'))
+  {
+    *target_out = 2U;
+  }
+  else if ((name_len == 2) && (name_start[0] == 'k') && (name_start[1] == 'd'))
+  {
+    *target_out = 3U;
+  }
+  else if ((name_len == 3) && (name_start[0] == 'a') && (name_start[1] == 'l') && (name_start[2] == 'l'))
+  {
+    *is_all_out = 1U;
+    *target_out = 0U;
+  }
+  else
+  {
+    return 0U;
+  }
+
+  while ((*p == ' ') || (*p == '\t') || (*p == '='))
+  {
+    p++;
+  }
+
+  if (*is_all_out != 0U)
+  {
+    if (PID_ParseFloatToken(&p, all_kp_out) == 0U)
+    {
+      return 0U;
+    }
+
+    while ((*p == ' ') || (*p == '\t'))
+    {
+      p++;
+    }
+    if (PID_ParseFloatToken(&p, all_ki_out) == 0U)
+    {
+      return 0U;
+    }
+
+    while ((*p == ' ') || (*p == '\t'))
+    {
+      p++;
+    }
+    if (PID_ParseFloatToken(&p, all_kd_out) == 0U)
+    {
+      return 0U;
+    }
+
+    while ((*p == ' ') || (*p == '\t'))
+    {
+      p++;
+    }
+
+    if (*p != '\0')
+    {
+      return 0U;
+    }
+
+    *has_value_out = 1U;
+    return 1U;
+  }
+
+  if (*p == '\0')
+  {
+    *has_value_out = 0U;
+    return 1U;
+  }
+
+  if (PID_ParseFloatToken(&p, value_out) == 0U)
+  {
+    return 0U;
+  }
+
+  while ((*p == ' ') || (*p == '\t'))
+  {
+    p++;
+  }
+
+  if (*p != '\0')
+  {
+    return 0U;
+  }
+
+  *has_value_out = 1U;
+  return 1U;
+}
+
+static const char *AppModeToString(AppMode_t mode)
+{
+  switch (mode)
+  {
+    case APP_MODE_IDLE:
+      return "IDLE";
+    case APP_MODE_MELODY:
+      return "MELODY";
+    case APP_MODE_PID:
+      return "PID";
+    case APP_MODE_TEMP:
+      return "TEMP";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+static void UART_PrintCurrentStatus(void)
+{
+  int32_t sp_x10 = (int32_t)(pid_setpoint_c * 10.0f);
+  int32_t temp_x100 = (int32_t)(pid_last_temp_c * 100.0f);
+  int32_t out_x10 = (int32_t)(pid_last_output * 10.0f);
+
+  printf("=== STATUS ===\r\n");
+  printf("MODE: %s\r\n", AppModeToString(app_mode));
+  printf("SP: %ld.%01ldC\r\n",
+         (long)(sp_x10 / 10),
+         (long)(sp_x10 < 0 ? -(sp_x10 % 10) : (sp_x10 % 10)));
+  printf("LAST TEMP: %ld.%02ldC\r\n",
+         (long)(temp_x100 / 100),
+         (long)(temp_x100 < 0 ? -(temp_x100 % 100) : (temp_x100 % 100)));
+  printf("LAST ADC RAW: %u\r\n", (unsigned int)pid_last_adc_raw);
+  printf("LAST PWM OUT: %ld.%01ld%%\r\n",
+         (long)(out_x10 / 10),
+         (long)(out_x10 < 0 ? -(out_x10 % 10) : (out_x10 % 10)));
+}
+
 static void UART_ProcessCommand(void)
 {
   uint8_t data;
@@ -471,7 +711,7 @@ static void UART_ProcessCommand(void)
       else if (strcmp(uart_cmd_buf, "temp") == 0)
       {
         EnterTempMode();
-        printf("Temp monitor mode. RAW and temperature every 500ms.\r\n");
+        printf("Temp monitor mode. RAW and temperature every 50ms (20Hz).\r\n");
       }
       else if (strcmp(uart_cmd_buf, "pid") == 0)
       {
@@ -497,6 +737,117 @@ static void UART_ProcessCommand(void)
         {
           printf("Usage: sp <tempC> (0~100)\r\n");
         }
+      }
+      else if ((strncmp(uart_cmd_buf, "coeff", 5) == 0) && ((uart_cmd_buf[5] == '\0') || (uart_cmd_buf[5] == ' ') || (uart_cmd_buf[5] == '\t') || (uart_cmd_buf[5] == '=')))
+      {
+        uint8_t coeff_target = 0U;
+        uint8_t has_value = 0U;
+        uint8_t coeff_is_all = 0U;
+        float coeff_value = 0.0f;
+        float coeff_all_kp = 0.0f;
+        float coeff_all_ki = 0.0f;
+        float coeff_all_kd = 0.0f;
+        int32_t kp_x100;
+        int32_t ki_x100;
+        int32_t kd_x100;
+
+        if (PID_ParseCoeffCommand(uart_cmd_buf,
+                                  &coeff_target,
+                                  &coeff_value,
+                                  &has_value,
+                                  &coeff_is_all,
+                                  &coeff_all_kp,
+                                  &coeff_all_ki,
+                                  &coeff_all_kd) == 0U)
+        {
+          printf("Usage: coeff | coeff <kp|ki|kd> [value] | coeff all <kp> <ki> <kd> (0~1000)\r\n");
+        }
+        else
+        {
+          if (has_value != 0U)
+          {
+            if (app_mode == APP_MODE_PID)
+            {
+              printf("Cannot change coeff in PID mode. Change mode first (stop/start/temp).\r\n");
+            }
+            else if (coeff_is_all != 0U)
+            {
+              pid_kp = coeff_all_kp;
+              pid_ki = coeff_all_ki;
+              pid_kd = coeff_all_kd;
+              pid_integral = 0.0f;
+              pid_prev_error = 0.0f;
+              printf("PID coeff updated\r\n");
+            }
+            else if (coeff_target == 1U)
+            {
+              pid_kp = coeff_value;
+              pid_integral = 0.0f;
+              pid_prev_error = 0.0f;
+              printf("PID coeff updated\r\n");
+            }
+            else if (coeff_target == 2U)
+            {
+              pid_ki = coeff_value;
+              pid_integral = 0.0f;
+              pid_prev_error = 0.0f;
+              printf("PID coeff updated\r\n");
+            }
+            else if (coeff_target == 3U)
+            {
+              pid_kd = coeff_value;
+              pid_integral = 0.0f;
+              pid_prev_error = 0.0f;
+              printf("PID coeff updated\r\n");
+            }
+          }
+
+          kp_x100 = (int32_t)(pid_kp * 100.0f);
+          ki_x100 = (int32_t)(pid_ki * 100.0f);
+          kd_x100 = (int32_t)(pid_kd * 100.0f);
+          printf("COEFF KP=%ld.%02ld KI=%ld.%02ld KD=%ld.%02ld\r\n",
+                 (long)(kp_x100 / 100),
+                 (long)(kp_x100 < 0 ? -(kp_x100 % 100) : (kp_x100 % 100)),
+                 (long)(ki_x100 / 100),
+                 (long)(ki_x100 < 0 ? -(ki_x100 % 100) : (ki_x100 % 100)),
+                 (long)(kd_x100 / 100),
+                 (long)(kd_x100 < 0 ? -(kd_x100 % 100) : (kd_x100 % 100)));
+        }
+      }
+      else if ((strncmp(uart_cmd_buf, "cv", 2) == 0) && ((uart_cmd_buf[2] == '\0') || (uart_cmd_buf[2] == ' ') || (uart_cmd_buf[2] == '\t') || (uart_cmd_buf[2] == '=')))
+      {
+        const char *p = &uart_cmd_buf[2];
+
+        while ((*p == ' ') || (*p == '\t') || (*p == '='))
+        {
+          p++;
+        }
+
+        if (*p == '\0')
+        {
+          printf("CV mode: %s (off=text, on=csv)\r\n", (pid_cv_csv_mode != 0U) ? "on" : "off");
+        }
+        else if ((strcmp(p, "on") == 0) || (strcmp(p, "0n") == 0))
+        {
+          pid_cv_csv_mode = 1U;
+          printf("CV mode set: on (PID report in CSV for serial plotter)\r\n");
+        }
+        else if (strcmp(p, "off") == 0)
+        {
+          pid_cv_csv_mode = 0U;
+          printf("CV mode set: off (PID report in text)\r\n");
+        }
+        else
+        {
+          printf("Usage: cv=on/off (or cv on/off)\r\n");
+        }
+      }
+      else if (strcmp(uart_cmd_buf, "help") == 0)
+      {
+        printf("Commands: start / stop / temp / pid / sp <tempC> / coeff / cv=on/off / help\r\n");
+        printf("PID coeff: coeff, coeff kp <v>, coeff ki <v>, coeff kd <v>, coeff all <kp> <ki> <kd>\r\n");
+        printf("PID CV: cv=off(text), cv=on(csv for plotter)\r\n");
+        UART_PrintCurrentStatus();
       }
       else
       {
@@ -556,7 +907,7 @@ int main(void)
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
   EnterMelodyMode();
   (void)HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1U);
-  printf("USART2 ready. Commands: start / stop / temp / pid / sp <tempC>\r\n");
+  printf("USART2 ready. Commands: start / stop / temp / pid / sp <tempC> / coeff / cv=on/off / help\r\n");
 
   /* USER CODE END 2 */
 
@@ -590,7 +941,7 @@ int main(void)
       melody_tick = HAL_GetTick();
     }
 
-    if ((app_mode == APP_MODE_TEMP) && (HAL_GetTick() - temp_report_tick >= 500U))
+    if ((app_mode == APP_MODE_TEMP) && (HAL_GetTick() - temp_report_tick >= PID_CONTROL_MS))
     {
       float temp_c;
       int32_t temp_x100;
@@ -610,7 +961,7 @@ int main(void)
       PID_Update();
     }
 
-    if ((app_mode == APP_MODE_PID) && (HAL_GetTick() - pid_report_tick >= 1000U))
+    if ((app_mode == APP_MODE_PID) && (HAL_GetTick() - pid_report_tick >= PID_CONTROL_MS))
     {
       int32_t temp_x100;
       int32_t sp_x10;
@@ -621,14 +972,28 @@ int main(void)
       sp_x10 = (int32_t)(pid_setpoint_c * 10.0f);
       out_x10 = (int32_t)(pid_last_output * 10.0f);
 
-      printf("PID RAW=%u T=%ld.%02ldC SP=%ld.%01ldC OUT=%ld.%01ld%%\r\n",
-             (unsigned int)pid_last_adc_raw,
-             (long)(temp_x100 / 100),
-             (long)(temp_x100 < 0 ? -(temp_x100 % 100) : (temp_x100 % 100)),
-             (long)(sp_x10 / 10),
-             (long)(sp_x10 < 0 ? -(sp_x10 % 10) : (sp_x10 % 10)),
-             (long)(out_x10 / 10),
-             (long)(out_x10 < 0 ? -(out_x10 % 10) : (out_x10 % 10)));
+      if (pid_cv_csv_mode != 0U)
+      {
+        printf("%u,%ld.%02ld,%ld.%01ld,%ld.%01ld\r\n",
+               (unsigned int)pid_last_adc_raw,
+               (long)(temp_x100 / 100),
+               (long)(temp_x100 < 0 ? -(temp_x100 % 100) : (temp_x100 % 100)),
+               (long)(sp_x10 / 10),
+               (long)(sp_x10 < 0 ? -(sp_x10 % 10) : (sp_x10 % 10)),
+               (long)(out_x10 / 10),
+               (long)(out_x10 < 0 ? -(out_x10 % 10) : (out_x10 % 10)));
+      }
+      else
+      {
+        printf("PID RAW=%u T=%ld.%02ldC SP=%ld.%01ldC OUT=%ld.%01ld%%\r\n",
+               (unsigned int)pid_last_adc_raw,
+               (long)(temp_x100 / 100),
+               (long)(temp_x100 < 0 ? -(temp_x100 % 100) : (temp_x100 % 100)),
+               (long)(sp_x10 / 10),
+               (long)(sp_x10 < 0 ? -(sp_x10 % 10) : (sp_x10 % 10)),
+               (long)(out_x10 / 10),
+               (long)(out_x10 < 0 ? -(out_x10 % 10) : (out_x10 % 10)));
+      }
     }
   }
   /* USER CODE END 3 */

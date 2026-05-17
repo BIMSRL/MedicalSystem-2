@@ -1,0 +1,387 @@
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--font-sans, sans-serif); font-size: 14px; color: var(--color-text-primary); background: transparent; }
+  .widget-header { padding: 0 0 14px 0; border-bottom: 0.5px solid var(--color-border-tertiary); margin-bottom: 16px; }
+  .widget-header h2 { font-size: 18px; font-weight: 500; color: var(--color-text-primary); margin-bottom: 3px; }
+  .widget-header p { font-size: 12px; color: var(--color-text-secondary); }
+  .tabs { display: flex; border-bottom: 1px solid var(--color-border-tertiary); margin-bottom: 16px; }
+  .tab { padding: 8px 20px; font-size: 13px; cursor: pointer; border: none; background: transparent; color: var(--color-text-secondary); border-bottom: 2px solid transparent; margin-bottom: -1px; transition: all .15s; }
+  .tab.active { color: var(--color-text-primary); border-bottom-color: var(--color-text-primary); font-weight: 500; }
+  .panel { display: none; } .panel.active { display: block; }
+  .controls { max-width: 480px; margin-bottom: 12px; }
+  .row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+  .row label { font-size: 12px; color: var(--color-text-secondary); min-width: 100px; }
+  .row input[type=range] { width: 220px; flex: none; }
+  .row .val { font-size: 12px; font-weight: 500; min-width: 36px; color: var(--color-text-primary); }
+  canvas { width: 100% !important; background: #fff; border-radius: 6px; border: 0.5px solid var(--color-border-tertiary); display: block; }
+  .param-box { background: var(--color-background-secondary); border-radius: 8px; padding: 10px 14px; margin-top: 10px; font-size: 12px; line-height: 1.9; }
+  .param-row { display: flex; gap: 20px; flex-wrap: wrap; }
+  .param-item { display: flex; flex-direction: column; align-items: center; min-width: 80px; }
+  .param-item .pname { font-size: 11px; color: var(--color-text-secondary); }
+  .param-item .pval { font-size: 15px; font-weight: 500; color: var(--color-text-primary); }
+  .legend { display: flex; gap: 16px; font-size: 11px; color: var(--color-text-secondary); margin: 6px 0 4px; flex-wrap: wrap; }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  h3 { font-size: 13px; font-weight: 500; margin-bottom: 10px; color: var(--color-text-secondary); }
+  .note { font-size: 11px; color: var(--color-text-secondary); margin-top: 6px; line-height: 1.5; }
+  select { font-size: 12px; padding: 3px 6px; border: 0.5px solid var(--color-border-secondary); border-radius: 5px; background: var(--color-background-primary); color: var(--color-text-primary); }
+</style>
+
+<h2 class="sr-only">Ziegler-Nichols PID Tuning Methods — interactive simulator</h2>
+
+<div class="widget-header">
+  <h2>Ziegler-Nichols PID tuning methods</h2>
+  <p>Ziegler &amp; Nichols (1942) — step response method &amp; ultimate gain method interactive simulator &nbsp;|&nbsp; by KKU-BME, JWLee</p>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab(0)">Method 1: Step response</button>
+  <button class="tab" onclick="switchTab(1)">Method 2: Ultimate gain</button>
+  <button class="tab" onclick="switchTab(2)">PID closed-loop response</button>
+</div>
+
+<!-- Panel 0 -->
+<div class="panel active" id="p0">
+  <h3>Open-loop step response — extract L and T from the S-curve</h3>
+  <div class="controls">
+    <div class="row"><label>Process gain K</label><input type="range" id="s_K" min="0.5" max="4" step="0.1" value="2" oninput="drawStep()"><span class="val" id="s_K_v">2.0</span></div>
+    <div class="row"><label>Time constant τ</label><input type="range" id="s_tau" min="2" max="20" step="0.5" value="10" oninput="drawStep()"><span class="val" id="s_tau_v">10.0</span></div>
+    <div class="row"><label>Dead time L</label><input type="range" id="s_L" min="0.5" max="6" step="0.1" value="2" oninput="drawStep()"><span class="val" id="s_L_v">2.0</span></div>
+  </div>
+  <div class="legend">
+    <span><span style="display:inline-block;width:18px;height:2px;background:#1a56a0;border-radius:1px"></span> Step response</span>
+    <span><span style="display:inline-block;width:18px;height:2px;background:#e05a2b;border-radius:1px"></span> Inflection tangent</span>
+    <span><span style="display:inline-block;width:18px;height:0;border-top:2px dashed #228b3b"></span> L &amp; T markers</span>
+  </div>
+  <canvas id="c_step" height="240"></canvas>
+  <div class="param-box">
+    <div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:6px;">Z-N PID parameters (step response method)</div>
+    <div class="param-row">
+      <div class="param-item"><span class="pname">Kp</span><span class="pval" id="zn1_kp">—</span></div>
+      <div class="param-item"><span class="pname">Ti</span><span class="pval" id="zn1_ti">—</span></div>
+      <div class="param-item"><span class="pname">Td</span><span class="pval" id="zn1_td">—</span></div>
+      <div class="param-item"><span class="pname">Ki = Kp/Ti</span><span class="pval" id="zn1_ki">—</span></div>
+      <div class="param-item"><span class="pname">Kd = Kp·Td</span><span class="pval" id="zn1_kd">—</span></div>
+    </div>
+    <p class="note">Formula: Kp = 1.2T/L &nbsp;|&nbsp; Ti = 2L &nbsp;|&nbsp; Td = 0.5L</p>
+  </div>
+</div>
+
+<!-- Panel 1 -->
+<div class="panel" id="p1">
+  <h3>Closed-loop with P-only control — find K<sub>u</sub> and T<sub>u</sub></h3>
+  <div class="controls">
+    <div class="row"><label>Ku (drag to margin)</label><input type="range" id="u_Ku" min="0.5" max="12" step="0.1" value="4" oninput="drawUltimate()"><span class="val" id="u_Ku_v">4.0</span></div>
+    <div class="row"><label>Gain fraction K/Ku</label><input type="range" id="u_frac" min="0.1" max="1.1" step="0.01" value="0.6" oninput="drawUltimate()"><span class="val" id="u_frac_v">0.60</span></div>
+    <div class="row"><label>Plant order</label>
+      <select id="u_order" onchange="drawUltimate()">
+        <option value="3">3rd-order integrating</option>
+        <option value="4">4th-order</option>
+      </select>
+    </div>
+  </div>
+  <div class="legend">
+    <span><span style="display:inline-block;width:18px;height:2px;background:#1a56a0;border-radius:1px"></span> Output y(t)</span>
+    <span><span style="display:inline-block;width:18px;height:2px;background:#e05a2b;border-radius:1px"></span> Setpoint</span>
+  </div>
+  <canvas id="c_ult" height="240"></canvas>
+  <div class="param-box">
+    <div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:6px;">Z-N PID parameters (ultimate gain method)</div>
+    <div class="param-row">
+      <div class="param-item"><span class="pname">Kp</span><span class="pval" id="zn2_kp">—</span></div>
+      <div class="param-item"><span class="pname">Ti</span><span class="pval" id="zn2_ti">—</span></div>
+      <div class="param-item"><span class="pname">Td</span><span class="pval" id="zn2_td">—</span></div>
+      <div class="param-item"><span class="pname">Ki = Kp/Ti</span><span class="pval" id="zn2_ki">—</span></div>
+      <div class="param-item"><span class="pname">Kd = Kp·Td</span><span class="pval" id="zn2_kd">—</span></div>
+    </div>
+    <p class="note">Formula: Kp = 0.6Ku &nbsp;|&nbsp; Ti = Tu/2 &nbsp;|&nbsp; Td = Tu/8 &nbsp;|&nbsp; Tu measured at sustained oscillation</p>
+  </div>
+</div>
+
+<!-- Panel 2 -->
+<div class="panel" id="p2">
+  <h3>Closed-loop PID response — compare manual vs Z-N tuning</h3>
+  <div class="controls">
+    <div class="row"><label>Kp</label><input type="range" id="r_kp" min="0.1" max="6" step="0.05" value="1.2" oninput="drawResp()"><span class="val" id="r_kp_v">1.20</span></div>
+    <div class="row"><label>Ti</label><input type="range" id="r_ti" min="0.5" max="20" step="0.1" value="4" oninput="drawResp()"><span class="val" id="r_ti_v">4.0</span></div>
+    <div class="row"><label>Td</label><input type="range" id="r_td" min="0" max="5" step="0.05" value="1" oninput="drawResp()"><span class="val" id="r_td_v">1.00</span></div>
+  </div>
+  <div class="legend">
+    <span><span style="display:inline-block;width:18px;height:2px;background:#1a56a0;border-radius:1px"></span> Manual PID</span>
+    <span><span style="display:inline-block;width:18px;height:2px;background:#e05a2b;border-radius:1px"></span> Z-N PID (step method)</span>
+    <span><span style="display:inline-block;width:18px;height:0;border-top:1px dashed #888"></span> Setpoint</span>
+  </div>
+  <canvas id="c_resp" height="260"></canvas>
+  <div class="param-box" id="resp_metrics" style="font-size:12px;line-height:2;"></div>
+</div>
+
+<script>
+const DPR = window.devicePixelRatio || 1;
+const canvasCache = {};
+
+function initCanvas(id) {
+  if (canvasCache[id]) return canvasCache[id];
+  const c = document.getElementById(id);
+  const cssH = parseInt(c.getAttribute('height')) || 240;
+  const cssW = c.parentElement.clientWidth || 620;
+  c.width  = cssW * DPR;
+  c.height = cssH * DPR;
+  c.style.width  = cssW + 'px';
+  c.style.height = cssH + 'px';
+  const ctx = c.getContext('2d');
+  ctx.scale(DPR, DPR);
+  canvasCache[id] = { ctx, w: cssW, h: cssH };
+  return canvasCache[id];
+}
+
+function getCtx(id) {
+  const cache = initCanvas(id);
+  cache.ctx.clearRect(0, 0, cache.w, cache.h);
+  return cache;
+}
+
+function toPixel(v, vmin, vmax, pmin, pmax) {
+  return pmin + (v - vmin) / (vmax - vmin) * (pmax - pmin);
+}
+
+// mx=left margin, mr=right margin, mt=top margin, mb=bottom margin
+function drawAxes(ctx, w, h, mx, mr, mt, mb, xmax, ymin, ymax, xlabel, ylabel) {
+  const pw = w - mx - mr;
+  const ph = h - mt - mb;
+  ctx.strokeStyle = '#ccc'; ctx.lineWidth = 0.5;
+  ctx.beginPath(); ctx.moveTo(mx, mt + ph); ctx.lineTo(mx + pw, mt + ph); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(mx, mt); ctx.lineTo(mx, mt + ph); ctx.stroke();
+  ctx.fillStyle = '#888'; ctx.font = '11px sans-serif';
+  ctx.fillText(xlabel, mx + pw - 24, mt + ph + 16);
+  ctx.fillText(ylabel, mx - 6, mt - 6);
+  ctx.setLineDash([2, 3]); ctx.strokeStyle = '#eee'; ctx.lineWidth = 0.5;
+  for (let i = 1; i <= 5; i++) {
+    const xg = mx + pw * i / 5;
+    ctx.beginPath(); ctx.moveTo(xg, mt); ctx.lineTo(xg, mt + ph); ctx.stroke();
+    ctx.fillStyle = '#999'; ctx.font = '10px sans-serif';
+    ctx.fillText((xmax * i / 5).toFixed(1), xg - 10, mt + ph + 14);
+  }
+  for (let i = 1; i <= 4; i++) {
+    const yg = mt + ph - ph * i / 4;
+    ctx.beginPath(); ctx.moveTo(mx, yg); ctx.lineTo(mx + pw, yg); ctx.stroke();
+    ctx.fillStyle = '#999'; ctx.font = '10px sans-serif';
+    const yv = ymin + (ymax - ymin) * i / 4;
+    ctx.textAlign = 'right';
+    ctx.fillText(yv.toFixed(1), mx - 4, yg + 4);
+    ctx.textAlign = 'left';
+  }
+  ctx.setLineDash([]);
+  return { x0: mx, y0: mt + ph, pw, ph };
+}
+
+function px(t, xmax, x0, pw) { return x0 + t / xmax * pw; }
+function py(v, ymin, ymax, y0, ph) { return y0 - (v - ymin) / (ymax - ymin) * ph; }
+
+function drawStep() {
+  const K   = +document.getElementById('s_K').value;
+  const tau = +document.getElementById('s_tau').value;
+  const L   = +document.getElementById('s_L').value;
+  document.getElementById('s_K_v').textContent   = K.toFixed(1);
+  document.getElementById('s_tau_v').textContent = tau.toFixed(1);
+  document.getElementById('s_L_v').textContent   = L.toFixed(2);
+
+  const { ctx, w, h } = getCtx('c_step');
+  const mx=56, mr=20, mt=24, mb=36;
+  const tmax = L + tau * 4.5, ymax = K * 1.15;
+  const { x0, y0, pw, ph } = drawAxes(ctx, w, h, mx, mr, mt, mb, tmax, 0, ymax, 'Time', 'y(t)');
+
+  const N = 400;
+  ctx.strokeStyle = '#1a56a0'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i <= N; i++) {
+    const t = tmax * i / N;
+    const yv = t < L ? 0 : K * (1 - Math.exp(-(t - L) / tau));
+    i === 0 ? ctx.moveTo(px(t,tmax,x0,pw), py(yv,0,ymax,y0,ph))
+            : ctx.lineTo(px(t,tmax,x0,pw), py(yv,0,ymax,y0,ph));
+  }
+  ctx.stroke();
+
+  const y_inf  = K * (1 - Math.exp(-1));
+  const slope  = K / tau * Math.exp(-1);
+  const t_zero = (L + tau) - y_inf / slope;
+  const t_K    = (K - y_inf) / slope + (L + tau);
+  const T      = t_K - t_zero;
+
+  const tx0 = px(t_zero, tmax, x0, pw), tx1 = px(t_K, tmax, x0, pw);
+  const ty0 = py(0, 0, ymax, y0, ph),   ty1 = py(K, 0, ymax, y0, ph);
+
+  ctx.strokeStyle = '#e05a2b'; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+  ctx.beginPath(); ctx.moveTo(tx0, ty0); ctx.lineTo(tx1, ty1); ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = '#228b3b'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(tx0, y0); ctx.lineTo(tx0, ty0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(tx1, y0); ctx.lineTo(tx1, ty1); ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = '#228b3b'; ctx.font = 'bold 11px sans-serif';
+  ctx.fillText('L', tx0 + 3, y0 - 5);
+  ctx.fillText('L+T', tx1 + 3, y0 - 5);
+
+  const arrowY = y0 - 12;
+  ctx.strokeStyle = '#228b3b'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x0, arrowY); ctx.lineTo(tx0, arrowY); ctx.stroke();
+  ctx.fillText('L=' + t_zero.toFixed(2), (x0 + tx0) / 2 - 12, arrowY - 3);
+  ctx.beginPath(); ctx.moveTo(tx0, arrowY - 9); ctx.lineTo(tx1, arrowY - 9); ctx.stroke();
+  ctx.fillText('T=' + T.toFixed(2), (tx0 + tx1) / 2 - 12, arrowY - 12);
+
+  const Kp = 1.2 * T / t_zero, Ti = 2 * t_zero, Td = 0.5 * t_zero;
+  document.getElementById('zn1_kp').textContent = Kp.toFixed(3);
+  document.getElementById('zn1_ti').textContent = Ti.toFixed(3);
+  document.getElementById('zn1_td').textContent = Td.toFixed(3);
+  document.getElementById('zn1_ki').textContent = (Kp / Ti).toFixed(4);
+  document.getElementById('zn1_kd').textContent = (Kp * Td).toFixed(3);
+}
+
+function simulatePonly(Kp, order, dt, N) {
+  const y = new Array(N).fill(0);
+  let x1=0, x2=0, x3=0, x4=0;
+  for (let i = 1; i < N; i++) {
+    const u = Kp * (1 - y[i-1]);
+    if (order === 3) {
+      x3 += dt*x2; x2 += dt*x1; x1 += dt*(-3*x1 - 3*x2 - x3 + u);
+      y[i] = x3;
+    } else {
+      x4 += dt*x3; x3 += dt*x2; x2 += dt*x1;
+      x1 += dt*(-4*x1 - 6*x2 - 4*x3 - x4 + u);
+      y[i] = x4;
+    }
+    if (Math.abs(y[i]) > 10) y[i] = Math.sign(y[i]) * 10;
+  }
+  return y;
+}
+
+function drawUltimate() {
+  const Ku_set = +document.getElementById('u_Ku').value;
+  const frac   = +document.getElementById('u_frac').value;
+  const order  = +document.getElementById('u_order').value;
+  document.getElementById('u_Ku_v').textContent   = Ku_set.toFixed(1);
+  document.getElementById('u_frac_v').textContent = frac.toFixed(2);
+
+  const dt = 0.04, N = 700;
+  const y = simulatePonly(Ku_set * frac, order, dt, N);
+  const { ctx, w, h } = getCtx('c_ult');
+  const mx=56, mr=20, mt=24, mb=36;
+  const tmax = dt * N, ymin = -2.2, ymax = 3.0;
+  const { x0, y0, pw, ph } = drawAxes(ctx, w, h, mx, mr, mt, mb, tmax, ymin, ymax, 'Time (s)', 'y(t)');
+
+  const sp = py(1, ymin, ymax, y0, ph);
+  ctx.strokeStyle = '#e05a2b'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(x0, sp); ctx.lineTo(x0 + pw, sp); ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = '#1a56a0'; ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  y.forEach((yv, i) => {
+    const ppx = px(i * dt, tmax, x0, pw), ppy = py(yv, ymin, ymax, y0, ph);
+    i === 0 ? ctx.moveTo(ppx, ppy) : ctx.lineTo(ppx, ppy);
+  });
+  ctx.stroke();
+
+  const half = Math.floor(N / 2);
+  const crossings = [];
+  for (let i = 1; i < N - half; i++) {
+    if ((y[half+i-1]-1)*(y[half+i]-1) <= 0 && y[half+i] > y[half+i-1])
+      crossings.push((half + i) * dt);
+  }
+  let Tu = 0;
+  if (crossings.length >= 2) Tu = crossings[crossings.length-1] - crossings[crossings.length-2];
+  if (Tu > 0.3) {
+    const p1 = px(crossings[crossings.length-2], tmax, x0, pw);
+    const p2 = px(crossings[crossings.length-1], tmax, x0, pw);
+    ctx.strokeStyle = '#228b3b'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(p1, sp - 18); ctx.lineTo(p2, sp - 18); ctx.stroke();
+    ctx.fillStyle = '#228b3b'; ctx.font = '10px sans-serif';
+    ctx.fillText('Tu≈' + Tu.toFixed(2) + 's', (p1+p2)/2 - 20, sp - 22);
+  }
+
+  ctx.fillStyle = frac > 0.95 ? '#c0392b' : '#228b3b';
+  ctx.font = '11px sans-serif';
+  const lbl = frac > 0.95 ? ' (unstable)' : frac > 0.85 ? ' (near oscillation)' : frac < 0.45 ? ' (under-damped)' : ' (stable)';
+  ctx.fillText('K/Ku = ' + frac.toFixed(2) + lbl, x0 + 8, mt + 16);
+
+  const pKp = 0.6 * Ku_set, pTi = Tu > 0 ? Tu/2 : 0, pTd = Tu > 0 ? Tu/8 : 0;
+  document.getElementById('zn2_kp').textContent = pKp.toFixed(3);
+  document.getElementById('zn2_ti').textContent = Tu > 0 ? pTi.toFixed(3) : '—';
+  document.getElementById('zn2_td').textContent = Tu > 0 ? pTd.toFixed(3) : '—';
+  document.getElementById('zn2_ki').textContent = Tu > 0 ? (pKp/pTi).toFixed(4) : '—';
+  document.getElementById('zn2_kd').textContent = Tu > 0 ? (pKp*pTd).toFixed(3) : '—';
+}
+
+function simulatePID(Kp, Ti, Td, dt, N) {
+  const y = new Array(N).fill(0);
+  let integral = 0, prev_e = 0, x1=0, x2=0, x3=0;
+  for (let i = 1; i < N; i++) {
+    const e = 1 - y[i-1];
+    integral += e * dt;
+    const u = Math.max(-8, Math.min(8, Kp * (e + (Ti > 0 ? integral/Ti : 0) + Td * (e - prev_e) / dt)));
+    prev_e = e;
+    x3 += dt*x2; x2 += dt*x1; x1 += dt*(-3*x1 - 3*x2 - x3 + u);
+    y[i] = Math.max(-5, Math.min(5, x3));
+  }
+  return y;
+}
+
+function drawResp() {
+  const Kp = +document.getElementById('r_kp').value;
+  const Ti = +document.getElementById('r_ti').value;
+  const Td = +document.getElementById('r_td').value;
+  document.getElementById('r_kp_v').textContent = Kp.toFixed(2);
+  document.getElementById('r_ti_v').textContent = Ti.toFixed(1);
+  document.getElementById('r_td_v').textContent = Td.toFixed(2);
+
+  const dt = 0.05, N = 600;
+  const yM  = simulatePID(Kp, Ti, Td, dt, N);
+  const yZN = simulatePID(0.6*8*0.6, (2*Math.PI/1.732)/2, (2*Math.PI/1.732)/8, dt, N);
+
+  const { ctx, w, h } = getCtx('c_resp');
+  const mx=56, mr=20, mt=24, mb=36;
+  const tmax = dt * N, ymin = -0.2, ymax = 1.7;
+  const { x0, y0, pw, ph } = drawAxes(ctx, w, h, mx, mr, mt, mb, tmax, ymin, ymax, 'Time (s)', 'y(t)');
+
+  const sp = py(1, ymin, ymax, y0, ph);
+  ctx.strokeStyle = '#888'; ctx.lineWidth = 0.8; ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(x0, sp); ctx.lineTo(x0 + pw, sp); ctx.stroke();
+  ctx.setLineDash([]);
+
+  [[yZN, '#e05a2b'], [yM, '#1a56a0']].forEach(([arr, col]) => {
+    ctx.strokeStyle = col; ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    arr.forEach((yv, i) => {
+      const ppx = px(i*dt, tmax, x0, pw), ppy = py(yv, ymin, ymax, y0, ph);
+      i === 0 ? ctx.moveTo(ppx, ppy) : ctx.lineTo(ppx, ppy);
+    });
+    ctx.stroke();
+  });
+
+  function metrics(arr) {
+    const peak = Math.max(...arr);
+    const OS = Math.max(0, (peak - 1) * 100);
+    let ts = 0, tr = 0;
+    for (let i = arr.length-1; i >= 0; i--) { if (Math.abs(arr[i]-1) > 0.02) { ts = (i+1)*dt; break; } }
+    for (let i = 0; i < arr.length-1; i++) { if (arr[i] <= 0.9 && arr[i+1] >= 0.9) { tr = (i+1)*dt; break; } }
+    return { OS: OS.toFixed(1), ts: ts.toFixed(1), tr: tr.toFixed(2) };
+  }
+  const m1 = metrics(yM), m2 = metrics(yZN);
+  document.getElementById('resp_metrics').innerHTML =
+    `<div style="display:flex;gap:24px;flex-wrap:wrap">
+      <div><span style="color:#1a56a0;font-weight:500">Manual PID</span> &nbsp; OS: ${m1.OS}% &nbsp; tr: ${m1.tr}s &nbsp; ts(2%): ${m1.ts}s</div>
+      <div><span style="color:#e05a2b;font-weight:500">Z-N PID</span> &nbsp; OS: ${m2.OS}% &nbsp; tr: ${m2.tr}s &nbsp; ts(2%): ${m2.ts}s</div>
+    </div>`;
+}
+
+function switchTab(n) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', i===n));
+  document.querySelectorAll('.panel').forEach((p,i) => p.classList.toggle('active', i===n));
+  if (n===0) drawStep();
+  if (n===1) drawUltimate();
+  if (n===2) drawResp();
+}
+
+drawStep();
+</script>
