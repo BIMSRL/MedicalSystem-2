@@ -1,21 +1,23 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  * @date           : 2026-05-08
-  * @author         : JeongWhan Lee
-  ******************************************************************************
-  * @attention
+  * @file main.c
+  * @brief TMP235 온도 측정, 부저 멜로디 재생, PID PWM 제어를 통합한 메인 애플리케이션
+  * @date 2026-05-08
+  * @author JeongWhan Lee
   *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
+  * @details
+  * 본 파일은 STM32F411 기반 보드에서 다음 기능을 단일 루프 구조로 수행한다.
+  * - USART2 명령 수신 및 명령어 파싱
+  * - TIM2 PWM을 이용한 부저 출력 주파수 제어
+  * - ADC1과 TMP235 센서를 이용한 온도 측정 및 이동 평균 필터 적용
+  * - 목표 온도 기준 PID 제어값 계산 및 PWM 듀티 출력
+  * - 현재 동작 상태를 텍스트 또는 CSV 형식으로 UART에 주기적으로 보고
   *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
+  * 동작 모드는 멜로디 재생, PID 제어, 온도 모니터링, 정지 상태로 구성되며,
+  * UART 명령을 통해 모드 전환과 PID 계수/목표 온도 변경이 가능하다.
   *
-  ******************************************************************************
+  * @note 자동 생성 영역과 사용자 코드 영역이 혼합되어 있으므로,
+  *       기능 변경 시 USER CODE 블록 보존 여부를 함께 확인해야 한다.
   */
 /* USER CODE END Header */ 
 /* Includes ------------------------------------------------------------------*/
@@ -31,6 +33,10 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+/**
+  * @brief 애플리케이션 실행 모드 정의
+  * @details 메인 루프에서 현재 어떤 작업을 수행할지 결정하는 상태값이다.
+  */
 typedef enum
 {
   APP_MODE_IDLE = 0,
@@ -43,6 +49,8 @@ typedef enum
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+/* 부저 재생 및 UART/ADC 처리에 사용되는 기본 상수 정의 */
 
 #define BUZZER_TIMER_TICK_HZ 10000U
 #define BUZZER_NOTE_MS       1000U
@@ -75,22 +83,35 @@ TIM_HandleTypeDef htim2;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+/* 상태 LED 점멸 주기 관리를 위한 기준 시각 */
 uint32_t led_toggle_time = 0;
+/* 도레미 3음 재생용 주파수 테이블 */
 const uint16_t melody_freq_hz[3] = {262U, 294U, 330U};
+/* 현재 재생 중인 음계 인덱스 */
 uint8_t melody_index = 0;
+/* 0: 음 출력 구간, 1: 음과 음 사이 공백 구간 */
 uint8_t melody_phase = 0;
+/* 마지막 멜로디 상태 전환 시각 */
 uint32_t melody_tick = 0;
+/* UART 인터럽트로 수신한 1바이트 임시 저장 버퍼 */
 uint8_t uart_rx_byte = 0U;
+/* 명령어 한 줄을 조합하기 위한 문자열 버퍼 */
 char uart_cmd_buf[UART_CMD_BUF_LEN] = {0};
+/* 현재 명령 버퍼에 저장된 문자 수 */
 uint8_t uart_cmd_idx = 0U;
+/* 인터럽트와 메인 루프 사이의 UART 수신 바이트 큐 */
 volatile uint8_t uart_rx_queue[UART_RX_QUEUE_LEN] = {0};
 volatile uint16_t uart_rx_q_head = 0U;
 volatile uint16_t uart_rx_q_tail = 0U;
+/* 큐가 가득 찼을 때 누락된 바이트 수 카운터 */
 volatile uint32_t uart_rx_q_overflow = 0U;
 
+/* 전원 인가 후 기본 동작은 멜로디 재생 모드로 시작한다. */
 AppMode_t app_mode = APP_MODE_MELODY;
+/* 현재 PWM 주기의 ARR 값을 저장하여 듀티 계산에 재사용한다. */
 uint32_t pwm_arr_current = 0U;
 
+/* PID 제어 관련 파라미터와 최근 계산 결과 저장 변수 */
 float pid_setpoint_c = PID_SETPOINT_DEFAULT_C;
 float pid_kp = 8.0f;
 float pid_ki = 0.12f;
@@ -103,6 +124,7 @@ uint16_t pid_last_adc_raw = 0U;
 uint32_t pid_last_tick = 0U;
 uint32_t pid_report_tick = 0U;
 uint32_t temp_report_tick = 0U;
+/* 0이면 사람이 읽기 쉬운 텍스트, 1이면 시리얼 플로터용 CSV 출력 */
 uint8_t pid_cv_csv_mode = 0U;
 /* USER CODE END PV */
 
@@ -145,6 +167,11 @@ int __io_putchar(int ch);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/**
+  * @brief 부저 출력 주파수를 설정한다.
+  * @param freq_hz 출력 주파수 [Hz], 0이면 출력을 정지한다.
+  * @details TIM2 PWM 주기를 갱신한 뒤 50% 듀티를 적용하여 사각파를 만든다.
+  */
 static void Buzzer_SetFrequency(uint32_t freq_hz)
 {
   if (freq_hz == 0U)
@@ -157,6 +184,12 @@ static void Buzzer_SetFrequency(uint32_t freq_hz)
   PWM_SetDutyPercent(50.0f);
 }
 
+/**
+  * @brief PWM 주파수를 설정한다.
+  * @param freq_hz 목표 주파수 [Hz]
+  * @details BUZZER_TIMER_TICK_HZ를 기준으로 ARR 값을 계산하고,
+  *          타이머 카운터를 초기화하여 즉시 새로운 주파수를 반영한다.
+  */
 static void PWM_SetFrequency(uint32_t freq_hz)
 {
   uint32_t arr;
@@ -179,9 +212,15 @@ static void PWM_SetFrequency(uint32_t freq_hz)
   pwm_arr_current = arr;
   __HAL_TIM_SET_AUTORELOAD(&htim2, arr);
   __HAL_TIM_SET_COUNTER(&htim2, 0U);
+  /* Update 이벤트를 강제로 발생시켜 새 ARR 값이 바로 적용되도록 한다. */
   (void)HAL_TIM_GenerateEvent(&htim2, TIM_EVENTSOURCE_UPDATE);
 }
 
+/**
+  * @brief PWM 듀티비를 백분율 단위로 설정한다.
+  * @param duty_percent 듀티비 [%]
+  * @details 입력값을 0~100 범위로 제한한 뒤 CCR 값을 계산하여 PWM 출력 세기를 바꾼다.
+  */
 static void PWM_SetDutyPercent(float duty_percent)
 {
   uint32_t compare;
@@ -197,11 +236,12 @@ static void PWM_SetDutyPercent(float duty_percent)
 
   if (duty_percent >= 100.0f)
   {
-    /* CCR > ARR makes output stay high continuously in PWM mode. */
+    /* PWM 모드에서 CCR이 ARR보다 크면 출력이 계속 High 상태를 유지한다. */
     compare = pwm_arr_current + 1U;
   }
   else
   {
+    /* ARR 범위에 맞는 CCR 값을 계산해 평균 출력 비율을 맞춘다. */
     compare = (uint32_t)(((float)(pwm_arr_current + 1U) * duty_percent) / 100.0f);
     if (compare > pwm_arr_current)
     {
@@ -212,11 +252,20 @@ static void PWM_SetDutyPercent(float duty_percent)
   __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, compare);
 }
 
+/**
+  * @brief 부저 출력을 정지한다.
+  * @details 주파수 설정은 유지하되 듀티를 0%로 만들어 실제 출력을 끈다.
+  */
 static void Buzzer_Stop(void)
 {
   PWM_SetDutyPercent(0.0f);
 }
 
+/**
+  * @brief printf 출력을 USART2로 리다이렉션한다.
+  * @param ch 전송할 문자
+  * @return 전송한 문자 값
+  */
 int __io_putchar(int ch)
 {
   uint8_t c = (uint8_t)ch;
@@ -224,6 +273,12 @@ int __io_putchar(int ch)
   return ch;
 }
 
+/**
+  * @brief UART 수신 큐에 1바이트를 저장한다.
+  * @param data 저장할 수신 데이터
+  * @retval 1 저장 성공
+  * @retval 0 큐 포화로 저장 실패
+  */
 static uint8_t UART_RxQueuePush(uint8_t data)
 {
   uint16_t next = (uint16_t)((uart_rx_q_head + 1U) % UART_RX_QUEUE_LEN);
@@ -239,6 +294,12 @@ static uint8_t UART_RxQueuePush(uint8_t data)
   return 1U;
 }
 
+/**
+  * @brief UART 수신 큐에서 1바이트를 꺼낸다.
+  * @param data 꺼낸 데이터를 저장할 포인터
+  * @retval 1 데이터 존재
+  * @retval 0 큐 비어 있음
+  */
 static uint8_t UART_RxQueuePop(uint8_t *data)
 {
   if (uart_rx_q_head == uart_rx_q_tail)
@@ -251,6 +312,11 @@ static uint8_t UART_RxQueuePop(uint8_t *data)
   return 1U;
 }
 
+/**
+  * @brief 지정한 ADC 채널을 1회 변환하여 raw 값을 읽는다.
+  * @param channel 읽을 ADC 채널 번호
+  * @return 12비트 ADC raw 값, 실패 시 0
+  */
 static uint16_t ADC_ReadChannel(uint32_t channel)
 {
   ADC_ChannelConfTypeDef sConfig = {0};
@@ -281,6 +347,12 @@ static uint16_t ADC_ReadChannel(uint32_t channel)
   }
 }
 
+/**
+  * @brief TMP235 센서 전압을 온도로 변환한다.
+  * @return 섭씨 온도 값
+  * @details 최근 ADC 샘플에 대해 이동 평균을 적용하여 노이즈를 줄인 뒤,
+  *          TMP235의 오프셋과 기울기를 사용해 전압을 온도로 변환한다.
+  */
 static float TMP235_ReadTempC(void)
 {
   static uint16_t adc_hist[ADC_MOVING_AVG_SAMPLES] = {0U};
@@ -293,6 +365,7 @@ static float TMP235_ReadTempC(void)
 
   if (adc_count < ADC_MOVING_AVG_SAMPLES)
   {
+    /* 초기 구간에서는 샘플 개수가 충분하지 않으므로 누적 개수만큼 평균을 낸다. */
     adc_sum += raw;
     adc_hist[adc_idx] = raw;
     adc_idx = (uint8_t)((adc_idx + 1U) % ADC_MOVING_AVG_SAMPLES);
@@ -301,6 +374,7 @@ static float TMP235_ReadTempC(void)
   }
   else
   {
+    /* 버퍼가 가득 찬 이후에는 가장 오래된 샘플을 빼고 새 샘플을 더한다. */
     adc_sum -= adc_hist[adc_idx];
     adc_hist[adc_idx] = raw;
     adc_sum += raw;
@@ -313,6 +387,10 @@ static float TMP235_ReadTempC(void)
   return (voltage - TMP235_OFFSET_V) / TMP235_SLOPE_V_PER_C;
 }
 
+/**
+  * @brief 멜로디 재생 모드로 진입한다.
+  * @details 인덱스와 위상 상태를 초기화하고 첫 음을 즉시 출력한다.
+  */
 static void EnterMelodyMode(void)
 {
   app_mode = APP_MODE_MELODY;
@@ -322,6 +400,10 @@ static void EnterMelodyMode(void)
   Buzzer_SetFrequency(melody_freq_hz[melody_index]);
 }
 
+/**
+  * @brief PID 제어 모드로 진입한다.
+  * @details 적분항과 이전 오차를 초기화하여 모드 전환 직후의 과도 응답을 줄인다.
+  */
 static void EnterPidMode(void)
 {
   app_mode = APP_MODE_PID;
@@ -333,6 +415,10 @@ static void EnterPidMode(void)
   PWM_SetDutyPercent(0.0f);
 }
 
+/**
+  * @brief 온도 모니터링 모드로 진입한다.
+  * @details 부저 출력을 끄고 일정 주기로 ADC raw 값과 온도를 UART로 보고한다.
+  */
 static void EnterTempMode(void)
 {
   app_mode = APP_MODE_TEMP;
@@ -341,12 +427,20 @@ static void EnterTempMode(void)
   temp_report_tick = HAL_GetTick();
 }
 
+/**
+  * @brief 출력 정지 모드로 전환한다.
+  * @details 부저 및 PWM 출력을 멈추고 명령 대기 상태로 유지한다.
+  */
 static void EnterIdleMode(void)
 {
   app_mode = APP_MODE_IDLE;
   Buzzer_Stop();
 }
 
+/**
+  * @brief PID 제어를 1회 수행한다.
+  * @details 현재 온도를 읽고 오차, 적분항, 미분항을 계산하여 PWM 듀티를 갱신한다.
+  */
 static void PID_Update(void)
 {
   float error;
@@ -357,6 +451,7 @@ static void PID_Update(void)
   pid_last_temp_c = TMP235_ReadTempC();
   error = pid_setpoint_c - pid_last_temp_c;
 
+  /* 적분항이 과도하게 커지는 것을 막기 위해 상하한을 둔다. */
   pid_integral += error * dt;
   if (pid_integral > 100.0f)
   {
@@ -370,6 +465,7 @@ static void PID_Update(void)
   derivative = (error - pid_prev_error) / dt;
   output = (pid_kp * error) + (pid_ki * pid_integral) + (pid_kd * derivative);
 
+  /* 실제 PWM 출력은 퍼센트 범위를 벗어날 수 없으므로 0~100으로 제한한다. */
   if (output < 0.0f)
   {
     output = 0.0f;
@@ -384,6 +480,13 @@ static void PID_Update(void)
   pid_prev_error = error;
 }
 
+/**
+  * @brief setpoint 명령 문자열에서 목표 온도를 파싱한다.
+  * @param cmd 명령 문자열
+  * @param setpoint_out 파싱 결과를 저장할 포인터
+  * @retval 1 파싱 성공
+  * @retval 0 형식 오류 또는 범위 초과
+  */
 static uint8_t PID_ParseSetpointCommand(const char *cmd, float *setpoint_out)
 {
   const char *p = cmd;
@@ -455,6 +558,13 @@ static uint8_t PID_ParseSetpointCommand(const char *cmd, float *setpoint_out)
   return 1U;
 }
 
+/**
+  * @brief 문자열 끝까지 소비하는 단일 실수 토큰을 파싱한다.
+  * @param p_inout 현재 파싱 위치 포인터의 주소
+  * @param value_out 파싱된 실수 저장 위치
+  * @retval 1 파싱 성공
+  * @retval 0 파싱 실패
+  */
 static uint8_t PID_ParseFloatToken(const char **p_inout, float *value_out)
 {
   const char *p = *p_inout;
@@ -516,6 +626,19 @@ static uint8_t PID_ParseFloatToken(const char **p_inout, float *value_out)
   return 1U;
 }
 
+/**
+  * @brief coeff 명령 문자열을 해석하여 PID 계수 변경 요청으로 변환한다.
+  * @param cmd 전체 명령 문자열
+  * @param target_out 개별 계수 대상 결과 저장 포인터
+  * @param value_out 개별 계수 값 저장 포인터
+  * @param has_value_out 값 포함 여부 저장 포인터
+  * @param is_all_out all 명령 여부 저장 포인터
+  * @param all_kp_out all 명령의 kp 저장 포인터
+  * @param all_ki_out all 명령의 ki 저장 포인터
+  * @param all_kd_out all 명령의 kd 저장 포인터
+  * @retval 1 명령 형식 유효
+  * @retval 0 명령 형식 오류
+  */
 static uint8_t PID_ParseCoeffCommand(const char *cmd,
                                      uint8_t *target_out,
                                      float *value_out,
@@ -646,6 +769,11 @@ static uint8_t PID_ParseCoeffCommand(const char *cmd,
   return 1U;
 }
 
+/**
+  * @brief 내부 모드 열거값을 사람이 읽을 수 있는 문자열로 변환한다.
+  * @param mode 현재 앱 모드
+  * @return 모드 이름 문자열
+  */
 static const char *AppModeToString(AppMode_t mode)
 {
   switch (mode)
@@ -663,6 +791,10 @@ static const char *AppModeToString(AppMode_t mode)
   }
 }
 
+/**
+  * @brief 현재 PID 및 모드 상태를 UART로 출력한다.
+  * @details help 명령 호출 시 사용되며, 현재 설정값과 최근 측정값을 함께 보여준다.
+  */
 static void UART_PrintCurrentStatus(void)
 {
   int32_t sp_x10 = (int32_t)(pid_setpoint_c * 10.0f);
@@ -683,6 +815,11 @@ static void UART_PrintCurrentStatus(void)
          (long)(out_x10 < 0 ? -(out_x10 % 10) : (out_x10 % 10)));
 }
 
+/**
+  * @brief UART 수신 큐를 소비하며 명령어를 해석하고 실행한다.
+  * @details 줄바꿈 문자를 기준으로 한 줄 명령을 확정한 뒤,
+  *          모드 전환, PID 설정 변경, 도움말 출력 등을 처리한다.
+  */
 static void UART_ProcessCommand(void)
 {
   uint8_t data;
@@ -700,16 +837,19 @@ static void UART_ProcessCommand(void)
 
       if (strcmp(uart_cmd_buf, "stop") == 0)
       {
+        /* 모든 출력 동작을 정지하고 대기 상태로 전환한다. */
         EnterIdleMode();
         printf("Output stopped\r\n");
       }
       else if (strcmp(uart_cmd_buf, "start") == 0)
       {
+        /* 기본 데모 동작인 멜로디 재생을 시작한다. */
         EnterMelodyMode();
         printf("Melody mode started\r\n");
       }
       else if (strcmp(uart_cmd_buf, "temp") == 0)
       {
+        /* PID 없이 센서 값만 주기적으로 관찰하는 모드이다. */
         EnterTempMode();
         printf("Temp monitor mode. RAW and temperature every 50ms (20Hz).\r\n");
       }
@@ -727,6 +867,7 @@ static void UART_ProcessCommand(void)
 
         if (PID_ParseSetpointCommand(uart_cmd_buf, &new_setpoint) != 0U)
         {
+          /* 목표 온도 변경 시 적분항과 이전 오차를 함께 초기화해 잔류 오차를 줄인다. */
           pid_setpoint_c = new_setpoint;
           pid_integral = 0.0f;
           pid_prev_error = 0.0f;
@@ -735,6 +876,7 @@ static void UART_ProcessCommand(void)
         }
         else
         {
+          /* 파싱 실패 시 허용 형식을 명확하게 안내한다. */
           printf("Usage: sp <tempC> (0~100)\r\n");
         }
       }
@@ -768,6 +910,7 @@ static void UART_ProcessCommand(void)
           {
             if (app_mode == APP_MODE_PID)
             {
+              /* 제어 중 파라미터 급변을 막기 위해 PID 모드에서는 계수 변경을 제한한다. */
               printf("Cannot change coeff in PID mode. Change mode first (stop/start/temp).\r\n");
             }
             else if (coeff_is_all != 0U)
@@ -860,10 +1003,12 @@ static void UART_ProcessCommand(void)
 
     if (uart_cmd_idx < (UART_CMD_BUF_LEN - 1U))
     {
+      /* 명령 비교를 단순화하기 위해 모두 소문자로 정규화해서 저장한다. */
       uart_cmd_buf[uart_cmd_idx++] = (char)tolower((int)data);
     }
     else
     {
+      /* 버퍼를 넘는 긴 명령은 폐기하고 다음 줄 입력을 기다린다. */
       uart_cmd_idx = 0U;
     }
   }
@@ -872,8 +1017,11 @@ static void UART_ProcessCommand(void)
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
+  * @brief 애플리케이션 진입점
+  * @retval int 사용하지 않음
+  * @details HAL 및 주변장치를 초기화한 뒤 무한 루프에서
+  *          LED 상태 표시, UART 명령 처리, 멜로디 재생, 온도 측정,
+  *          PID 제어와 UART 보고를 주기적으로 수행한다.
   */
 int main(void)
 {
@@ -904,8 +1052,10 @@ int main(void)
   MX_ADC1_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+  /* TIM2 PWM 출력을 시작한 뒤 기본 모드로 멜로디 재생을 활성화한다. */
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
   EnterMelodyMode();
+  /* UART는 인터럽트 기반 1바이트 수신을 계속 재장전하며 명령 큐를 채운다. */
   (void)HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1U);
   printf("USART2 ready. Commands: start / stop / temp / pid / sp <tempC> / coeff / cv=on/off / help\r\n");
 
@@ -925,16 +1075,19 @@ int main(void)
       led_toggle_time = HAL_GetTick();
     }
 
+      /* 수신된 UART 바이트를 조합하여 명령을 처리한다. */
     UART_ProcessCommand();
 
     if ((app_mode == APP_MODE_MELODY) && (melody_phase == 0U) && (HAL_GetTick() - melody_tick >= BUZZER_NOTE_MS))
     {
+        /* 한 음의 재생 시간이 끝나면 잠깐 정지하여 음 사이를 구분한다. */
       Buzzer_Stop();
       melody_phase = 1U;
       melody_tick = HAL_GetTick();
     }
     else if ((app_mode == APP_MODE_MELODY) && (melody_phase == 1U) && (HAL_GetTick() - melody_tick >= BUZZER_GAP_MS))
     {
+        /* 공백 시간이 끝나면 다음 음계로 넘어가 반복 재생한다. */
       melody_index = (uint8_t)((melody_index + 1U) % 3U);
       Buzzer_SetFrequency(melody_freq_hz[melody_index]);
       melody_phase = 0U;
@@ -946,6 +1099,7 @@ int main(void)
       float temp_c;
       int32_t temp_x100;
 
+      /* 온도 모니터링 모드에서는 일정 주기로 센서값만 읽어 UART로 전송한다. */
       temp_report_tick = HAL_GetTick();
       temp_c = TMP235_ReadTempC();
       temp_x100 = (int32_t)(temp_c * 100.0f);
@@ -957,6 +1111,7 @@ int main(void)
 
     if ((app_mode == APP_MODE_PID) && (HAL_GetTick() - pid_last_tick >= PID_CONTROL_MS))
     {
+      /* PID 제어 주기마다 현재 온도를 기반으로 새 출력값을 계산한다. */
       pid_last_tick = HAL_GetTick();
       PID_Update();
     }
@@ -974,6 +1129,7 @@ int main(void)
 
       if (pid_cv_csv_mode != 0U)
       {
+        /* CSV 형식은 시리얼 플로터나 외부 로깅 도구에서 바로 사용하기 쉽다. */
         printf("%u,%ld.%02ld,%ld.%01ld,%ld.%01ld\r\n",
                (unsigned int)pid_last_adc_raw,
                (long)(temp_x100 / 100),
@@ -985,6 +1141,7 @@ int main(void)
       }
       else
       {
+        /* 사람이 직접 확인할 때는 항목명을 포함한 텍스트 형식이 더 읽기 쉽다. */
         printf("PID RAW=%u T=%ld.%02ldC SP=%ld.%01ldC OUT=%ld.%01ld%%\r\n",
                (unsigned int)pid_last_adc_raw,
                (long)(temp_x100 / 100),
@@ -1229,6 +1386,12 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+/**
+  * @brief UART 수신 완료 인터럽트 콜백
+  * @param huart 수신 완료 이벤트를 발생시킨 UART 핸들
+  * @details USART2에서 1바이트를 수신할 때마다 큐에 적재하고,
+  *          다음 바이트 수신을 위해 인터럽트를 즉시 다시 건다.
+  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART2)
